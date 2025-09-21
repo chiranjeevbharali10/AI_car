@@ -37,3 +37,27 @@ class Car:
     def set_position(self, x, y):
         self.x = x
         self.y = y
+
+
+
+def get_sensor_data(self , road_surface , max_distance = 200): 
+    sensor_distance = [] 
+    direction = [0, 45 ,-45]
+
+
+    for d in direction:
+        angle = math.randians(self.angle + d )
+        distance = 0 
+
+        while distance < max_distance:
+            text_x = int(self.x + distance * math.cos(angle))
+            test_y = int(self.y - distance * math.sin(angle))
+            if test_x < 0 or test_x >= road_surface.get_width() or test_y < 0 or test_y >= road_surface.get_height():
+                break
+            color = road_surface.get_at((test_x , test_y))
+            if color == (0,0,0,255): 
+                break 
+            distance += 1
+        sensor_distance.append(distance/max_distance)
+    return sensor_distance
+
