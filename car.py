@@ -56,7 +56,8 @@ class Car:
                     test_y < 0 or test_y >= road_surface.get_height()):
                     break
 
-                # check road color
+                # check road color:q
+                #
                 color = road_surface.get_at((test_x, test_y))
                 if color == (0, 0, 0, 255):  # hit road
                     break
@@ -66,4 +67,7 @@ class Car:
             sensor_distance.append(distance / max_distance)
 
         return sensor_distance
+    def get_state(self , road_surface): 
 
+        sensors = self.get_sensor_data(road_surface)
+        return [self.x , self.y , self.angle , self.speed] + sensors 
