@@ -23,6 +23,28 @@ class Car:
         rect = rotated_car.get_rect(center=(self.x, self.y))
         surface.blit(rotated_car, rect.topleft)
 
+    def draw_sensors(self, surface, road_surface, max_distance=200):
+        """Visualize the sensor rays used for state input"""
+        directions = [0, 45, -45]
+        for d in directions:
+            angle = math.radians(self.angle + d)
+            distance = 0
+            end_x, end_y = self.x, self.y
+            while distance < max_distance:
+                test_x = int(self.x + distance * math.cos(angle))
+                test_y = int(self.y - distance * math.sin(angle))
+                if (test_x < 0 or test_x >= road_surface.get_width() or
+                    test_y < 0 or test_y >= road_surface.get_height()):
+                    break
+                # stop ray when we leave road (non-black)
+                color = road_surface.get_at((test_x, test_y))
+                if color != (0, 0, 0, 255):
+                    end_x, end_y = test_x, test_y
+                    break
+                end_x, end_y = test_x, test_y
+                distance += 1
+            pygame.draw.line(surface, (255, 255, 0), (self.x, self.y), (end_x, end_y), 2)
+
     def move_forward(self, step=1):
         """Move the car forward in the direction of its current angle"""
         rad = math.radians(self.angle)
@@ -56,10 +78,9 @@ class Car:
                     test_y < 0 or test_y >= road_surface.get_height()):
                     break
 
-                # check road color:q
-                #
+                # stop when we leave the road (black road pixels)
                 color = road_surface.get_at((test_x, test_y))
-                if color == (0, 0, 0, 255):  # hit road
+                if color != (0, 0, 0, 255):  # boundary hit (off-road)
                     break
 
                 distance += 1
@@ -68,6 +89,5 @@ class Car:
 
         return sensor_distance
     def get_state(self , road_surface): 
-
         sensors = self.get_sensor_data(road_surface)
         return [self.x , self.y , self.angle , self.speed] + sensors 

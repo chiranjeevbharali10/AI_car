@@ -1,7 +1,10 @@
 # main.py
 import pygame
 import math
+import os
+import json
 from car import Car
+from train import DQNAgent, run_episode
 
 pygame.init()
 screen = pygame.display.set_mode((1000, 800))
@@ -20,6 +23,8 @@ state = "setup"
 running = True
 last_mouse = None
 first_click = False
+start_training = False
+goal_pos = None
 
 while running:
     screen.fill((144, 238, 144))
@@ -50,8 +55,34 @@ while running:
                 car = Car(x, y)  # create car at first brush click
                 first_click = True
 
+        # Right-click to set goal point B
+        if mouse_click[2]:
+            gx, gy = mouse_pos
+            goal_pos = (gx, gy)
+
         if button_rect.collidepoint(mouse_pos) and mouse_click[0]:
-            state = "GO"
+            # Save the drawn road as an image for training, then start training
+            base_dir = os.path.dirname(__file__)
+            track_path = os.path.join(base_dir, "track.png")
+            try:
+                pygame.image.save(road_surface, track_path)
+                print(f"Saved track to: {track_path}")
+                # Save starting pose metadata
+                meta_path = os.path.join(base_dir, "track_meta.json")
+                start_meta = {
+                    "start_x": car.x if car else 0,
+                    "start_y": car.y if car else 0,
+                    "start_angle": car.angle if car else 0,
+                    "goal_x": goal_pos[0] if goal_pos else None,
+                    "goal_y": goal_pos[1] if goal_pos else None
+                }
+                with open(meta_path, "w") as f:
+                    json.dump(start_meta, f)
+                print(f"Saved start pose to: {meta_path}")
+            except Exception as e:
+                print(f"Failed to save track at {track_path}: {e}")
+            start_training = True
+            running = False
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -60,6 +91,14 @@ while running:
     pygame.display.update()
 
 pygame.quit()
+
+if start_training:
+    agent = DQNAgent()
+    for episode in range(50):
+        reward = run_episode(agent, render=True)
+        if episode % 10 == 0:
+            agent.update_target()
+            print(f"Episode {episode}, Reward: {reward:.2f}, Epsilon: {agent.epsilon:.2f}")
 
 
 
