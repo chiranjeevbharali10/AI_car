@@ -1,315 +1,322 @@
-import pygame
-import os
-import json
-
-import torch
-
-import torch.nn as nn
-
-import torch.nn.functional as F
-
-import torch.optim as optim
-
-import random
-
-import numpy as np
-
-from collections import deque
-
-from car import Car
-
-
-######## this whole thing is just completely defining the NN 
-class CarNN(nn.Module):
-    def __init__(self , input_size = 7 , hidden_size = 64 , output_size =3): 
-
-        super(CarNN , self).__init__()
-        self.fc1 = nn.Linear(input_size , hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, hidden_size)
-
-    def forward(self , x): 
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-
-        return x
-# -------- REPLAY BUFFER ---- ### 
-# -- Its basically gonna store the prev values and delete the first value and add new ones and so on 
-
-
-class ReplayBuffer : 
-    def __init__(self , capacity = 1000): 
-        self.buffer = deque(maxlen = capacity) 
-
-    def push(self , state , action , reward , next_state , done): 
-        self.buffer.append((state , action , reward , next_state , done))
-
-    def sample(self , batch_size):
-        batch = random.sample(self.buffer , batch_size)
-
-        s , a , r , ns , d  = zip(*batch)
-
-        return np.array(s), np.array(a) , np.array(r) ,np.array(ns) , np.array(d)
-
-    def __len__(self): 
-        return len(self.buffer)
-
-
-#--- DNQ Agent ----- 
-
-
-class DQNAgent: 
-
-    def __init__(self , input_size = 7 , lr = 0.001 , gamma = 0.99 , epsilon = 1.0 , epsilon_decay = 0.995 , epsilon_min = 0.01):
-        self.model = CarNN(input_size=input_size)
-        self.target_model = CarNN(input_size=input_size)
-        self.target_model.load_state_dict(self.model.state_dict())
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.gamma = gamma
-        self.epsilon = epsilon
-        self.epsilon_decay = epsilon_decay
-        self.epsilon_min = epsilon_min
-        self.replay_buffer = ReplayBuffer()
-        self.batch_size = 64
-
-
-
-    def select_action(self , state): 
-        state_tensor = torch.tensor(state, dtype = torch.float32)
-        if random.random() < self.epsilon: 
-            return random.randint(0,2)
-        with torch.no_grad(): 
-            q_values = self.model(state_tensor)
-            return torch.argmax(q_values).item() 
-
-
-    def train_step(self):
-        if len(self.replay_buffer) < self.batch_size:
-            return  
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
-        states = torch.tensor(states, dtype=torch.float32)
-        actions = torch.tensor(actions, dtype=torch.long)
-        rewards = torch.tensor(rewards, dtype=torch.float32)
-        next_states = torch.tensor(next_states, dtype=torch.float32)
-        dones = torch.tensor(dones, dtype=torch.float32)
-
-        # Compute current Q values
-        q_values = self.model(states)
-        q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
-
-        # Compute target Q values
-        with torch.no_grad():
-            next_q_values = self.target_model(next_states).max(1)[0]
-            target_q = rewards + self.gamma * next_q_values * (1 - dones)
-
-        loss = F.mse_loss(q_values, target_q)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_min, self.epsilon*self.epsilon_decay)
-
-    def update_target(self):
-        self.target_model.load_state_dict(self.model.state_dict())
-
-
-
-
-
-
-
-def run_episode(agent, render=False):
-    pygame.init()
-    # Load drawn track if available; fallback to blank surface
-    try:
-        base_dir = os.path.dirname(__file__)
-        track_path = os.path.join(base_dir, "track.png")
-        # Load first (no convert), get size, set display, then convert with alpha
-        loaded_image = pygame.image.load(track_path)
-        width, height = loaded_image.get_width(), loaded_image.get_height()
-        # Use double buffering and vsync to reduce flicker
-        screen = pygame.display.set_mode((width, height), pygame.DOUBLEBUF | pygame.SCALED, vsync=1)
-        road_image = loaded_image.convert_alpha()
-        road = pygame.Surface((width, height), pygame.SRCALPHA)
-        road.blit(road_image, (0, 0))
-        print(f"Loaded track from: {track_path} ({width}x{height})")
-        # Load starting pose if available
-        start_x, start_y, start_angle = width // 2, height // 2, 0
-        goal_x, goal_y = None, None
-        meta_path = os.path.join(base_dir, "track_meta.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r") as f:
-                    meta = json.load(f)
-                start_x = meta.get("start_x", start_x)
-                start_y = meta.get("start_y", start_y)
-                start_angle = meta.get("start_angle", start_angle)
-                goal_x = meta.get("goal_x", None)
-                goal_y = meta.get("goal_y", None)
-                print(f"Loaded start pose from meta: x={start_x}, y={start_y}, angle={start_angle}")
-            except Exception as me:
-                print(f"Failed to read track_meta.json: {me}")
-    except Exception as e:
-        print(f"Could not load track.png, using blank surface. Error: {e}")
-        width, height = 800, 600
-        screen = pygame.display.set_mode((width, height), pygame.DOUBLEBUF | pygame.SCALED, vsync=1)
-        road = pygame.Surface((width, height), pygame.SRCALPHA)
-        start_x, start_y, start_angle = width // 2, height // 2, 0
-    clock = pygame.time.Clock()
-
-    # If start is on a wall (black), nudge to nearest free pixel
-    def find_safe_start(x, y, max_radius=50):
-        road_color = (0, 0, 0, 255)
-        ix, iy = int(x), int(y)
-        # Prefer starting ON road; if already on road, keep
-        if 0 <= ix < width and 0 <= iy < height and road.get_at((ix, iy)) == road_color:
-            return x, y
-        for r in range(1, max_radius + 1):
-            for dx in (-r, 0, r):
-                for dy in (-r, 0, r):
-                    nx, ny = ix + dx, iy + dy
-                    if 0 <= nx < width and 0 <= ny < height and road.get_at((nx, ny)) == road_color:
-                        return float(nx), float(ny)
-        return x, y
-
-    safe_x, safe_y = find_safe_start(start_x, start_y)
-    if (safe_x, safe_y) != (start_x, start_y):
-        print(f"Adjusted start to road: x={safe_x}, y={safe_y}")
-
-    car = Car(safe_x, safe_y)
-    car.angle = start_angle
-    total_reward = 0
-    steps = 0
-    done = False
-    debug_overlay = True
-    goal = (goal_x, goal_y) if goal_x is not None and goal_y is not None else None
-
-    while not done and steps < 500:
-        state = car.get_state(road)
-        action = agent.select_action(state)
-
-        # Apply action
-        if action == 0: car.move_forward(2)
-        elif action == 1: car.angle += 5
-        elif action == 2: car.angle -= 5
-
-        # Reward: on-road bonus + progress toward goal, off-road penalty
-        color = road.get_at((int(car.x), int(car.y)))
-        if color == (0,0,0,255):  # on-road
-            reward = 0.05
-            if goal:
-                # dense shaping: reduce distance to goal
-                dx = goal[0] - car.x
-                dy = goal[1] - car.y
-                dist = (dx*dx + dy*dy) ** 0.5
-                # compute next distance for shaping
-                ndx = goal[0] - (car.x)
-                ndy = goal[1] - (car.y)
-                next_dist = (ndx*ndx + ndy*ndy) ** 0.5
-                progress = (dist - next_dist) * 0.01
-                reward += progress
-                # success condition
-                if dist < 20:
-                    reward += 5.0
-                    done = True
-        else:
-            reward = -1
-            done = True
-
-        total_reward += reward
-
-        # next state
-        next_state = car.get_state(road)
-
-        agent.replay_buffer.push(state, action, reward, next_state, done)
-        agent.train_step()
-
-        # update screen
-        if render:
-            # Handle events to keep window responsive
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    done = True
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_d:
-                        debug_overlay = not debug_overlay
-            screen.fill((144, 238, 144))
-            screen.blit(road,(0,0))
-            car.draw(screen)
-            if debug_overlay:
-                # draw sensors and collision dot
-                car.draw_sensors(screen, road)
-                cx, cy = int(car.x), int(car.y)
-                if 0 <= cx < width and 0 <= cy < height:
-                    pygame.draw.circle(screen, (0, 255, 0), (cx, cy), 3)
-                if goal:
-                    pygame.draw.circle(screen, (255, 0, 0), (int(goal[0]), int(goal[1])), 6)
-            pygame.display.flip()
-            clock.tick(60)
-
-        steps += 1
-
-    pygame.quit()
-    return total_reward
-
-# ----- Training Loop -----
-if __name__ == "__main__":
-    agent = DQNAgent()
-
-    for episode in range(1000):
-        reward = run_episode(agent, render=False)
-        if episode % 10 == 0:
-            agent.update_target()
-            print(f"Episode {episode}, Reward: {reward:.2f}, Epsilon: {agent.epsilon:.2f}")
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-'''
-
-import torch.optim as optim 
-
-model = CarNN() 
-
-optimizer = optim.Adam(model.parameters() , lr = 0.001)
-loss_fn = nn.MSELOSS() ##or USE RL loss 
-
-def select_action(state_tensor): 
-    wiht torch.no_grad(): 
-        output = model(state_tensor)
-        action = torch.argmax(output).item()
-
-    return action
-
-for episode in range(100):
-    car = Car(400, 300)
-    road = pygame.Surface((800, 600), pygame.SRCALPHA)
-    
-    for step in range(500):
-        state = car.get_state(road)
-        state_tensor = torch.tensor(state, dtype=torch.float32)
-        action = select_action(state_tensor)
-
-        # Apply action
-        if action == 0: car.move_forward(2)
-        elif action == 1: car.angle += 5
-        elif action == 2: car.angle -= 5
-'''
+# train.py
+import pygame
+import neat
+import os
+import json
+import math
+from car import Car
+
+class NEATTrainer:
+    def __init__(self, track_path="track.png", meta_path="track_meta.json"):
+        """Initialize the NEAT trainer with track and metadata"""
+        self.track_path = track_path
+        self.meta_path = meta_path
+        
+        # Load track image
+        if not os.path.exists(track_path):
+            raise FileNotFoundError(f"Track image not found: {track_path}")
+        
+        # Load start position and goal
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+            self.start_x = meta.get('start_x', 100)
+            self.start_y = meta.get('start_y', 100)
+            self.start_angle = meta.get('start_angle', 0)
+            self.goal_x = meta.get('goal_x', 900)
+            self.goal_y = meta.get('goal_y', 700)
+        
+        # Pygame setup for visualization (MUST initialize display first!)
+        pygame.init()
+        
+        # Load track image AFTER pygame.init() to get dimensions
+        temp_surface = pygame.image.load(track_path)
+        self.width = temp_surface.get_width()
+        self.height = temp_surface.get_height()
+        
+        # NOW create display
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption("NEAT Car Training - Parallel")
+        
+        # NOW convert_alpha will work
+        self.road_surface = pygame.image.load(track_path).convert_alpha()
+        
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("Arial", 18)
+        
+        # Training statistics
+        self.generation = 0
+        self.best_fitness = 0
+        self.best_genome = None
+
+    def is_on_road(self, x, y):
+        """Check if position (x, y) is on the black road"""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return False
+        color = self.road_surface.get_at((int(x), int(y)))
+        return color == (0, 0, 0, 255)
+
+    def calculate_fitness(self, car, steps, reached_goal):
+        """Calculate fitness based on distance traveled, goal proximity, and survival"""
+        # Distance to goal
+        dist_to_goal = math.sqrt((car.x - self.goal_x)**2 + (car.y - self.goal_y)**2)
+        
+        # Fitness components
+        survival_bonus = steps * 0.1  # Reward for staying alive
+        goal_proximity = max(0, 1000 - dist_to_goal)  # Reward for getting close to goal
+        goal_bonus = 5000 if reached_goal else 0  # Big bonus for reaching goal
+        
+        fitness = survival_bonus + goal_proximity + goal_bonus
+        return fitness
+
+    def eval_genomes(self, genomes, config):
+        """Evaluate ALL genomes in parallel (all cars drive at once!)"""
+        self.generation += 1
+        
+        # Create neural networks and cars for all genomes
+        cars_data = []
+        for genome_id, genome in genomes:
+            net = neat.nn.FeedForwardNetwork.create(genome, config)
+            car = Car(self.start_x, self.start_y, self.start_angle)
+            cars_data.append({
+                'genome_id': genome_id,
+                'genome': genome,
+                'net': net,
+                'car': car,
+                'alive': True,
+                'steps': 0,
+                'reached_goal': False
+            })
+        
+        max_steps = 1000
+        current_step = 0
+        
+        # Run simulation until all cars are done or max steps reached
+        while current_step < max_steps:
+            # Check for pygame events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    exit()
+            
+            # Count alive cars
+            alive_count = sum(1 for c in cars_data if c['alive'])
+            if alive_count == 0:
+                break  # All cars dead, end generation
+            
+            # Update each alive car
+            for car_data in cars_data:
+                if not car_data['alive']:
+                    continue
+                
+                car = car_data['car']
+                net = car_data['net']
+                
+                # Get sensor data
+                state = car.get_state(self.road_surface)
+                
+                # Get neural network output
+                output = net.activate(state)
+                steering = output[0]  # -1 to 1
+                acceleration = output[1]  # -1 to 1
+                
+                # Apply actions
+                car.angle += steering * 5
+                speed = max(0, acceleration * 3)
+                car.move_forward(step=speed)
+                
+                # Check if still on road
+                if not self.is_on_road(car.x, car.y):
+                    car_data['alive'] = False
+                    continue
+                
+                # Check if reached goal
+                dist_to_goal = math.sqrt((car.x - self.goal_x)**2 + (car.y - self.goal_y)**2)
+                if dist_to_goal < 30:
+                    car_data['reached_goal'] = True
+                    car_data['alive'] = False  # Done!
+                    continue
+                
+                car_data['steps'] += 1
+            
+            current_step += 1
+            
+            # RENDER ALL CARS AT ONCE
+            self.screen.fill((144, 238, 144))  # Green background
+            self.screen.blit(self.road_surface, (0, 0))
+            
+            # Draw goal
+            pygame.draw.circle(self.screen, (255, 0, 0), 
+                             (int(self.goal_x), int(self.goal_y)), 30, 3)
+            
+            # Draw all alive cars
+            for car_data in cars_data:
+                if car_data['alive']:
+                    car = car_data['car']
+                    car.draw(self.screen)
+            
+            # Display stats
+            successful_cars = sum(1 for c in cars_data if c['reached_goal'])
+            info_text = [
+                f"Generation: {self.generation}",
+                f"Step: {current_step}/{max_steps}",
+                f"Alive: {alive_count}/{len(cars_data)}",
+                f"Reached goal: {successful_cars}",
+                f"Best fitness: {self.best_fitness:.1f}"
+            ]
+            
+            y_offset = 10
+            for text in info_text:
+                text_surface = self.font.render(text, True, (255, 255, 255))
+                text_bg = pygame.Surface((text_surface.get_width() + 10, 
+                                        text_surface.get_height() + 5))
+                text_bg.fill((0, 0, 0))
+                text_bg.set_alpha(180)
+                self.screen.blit(text_bg, (10, y_offset))
+                self.screen.blit(text_surface, (15, y_offset + 2))
+                y_offset += 28
+            
+            pygame.display.flip()
+            self.clock.tick(60)  # 60 FPS
+        
+        # Calculate fitness for all genomes
+        for car_data in cars_data:
+            fitness = self.calculate_fitness(
+                car_data['car'], 
+                car_data['steps'], 
+                car_data['reached_goal']
+            )
+            car_data['genome'].fitness = fitness
+            
+            # Track best genome
+            if fitness > self.best_fitness:
+                self.best_fitness = fitness
+                self.best_genome = car_data['genome']
+                print(f"Generation {self.generation}: New best fitness: {fitness:.2f}")
+
+    def train(self, config_path="neat_config.txt", generations=50):
+        """Run NEAT training"""
+        # Load NEAT configuration
+        config = neat.Config(
+            neat.DefaultGenome,
+            neat.DefaultReproduction,
+            neat.DefaultSpeciesSet,
+            neat.DefaultStagnation,
+            config_path
+        )
+        
+        # Create population
+        population = neat.Population(config)
+        
+        # Add reporters for statistics
+        population.add_reporter(neat.StdOutReporter(True))
+        stats = neat.StatisticsReporter()
+        population.add_reporter(stats)
+        
+        # Run NEAT
+        print(f"Starting NEAT training for {generations} generations...")
+        print("All cars in each generation will run simultaneously!")
+        winner = population.run(self.eval_genomes, generations)
+        
+        # Save the winner
+        import pickle
+        with open('best_genome.pkl', 'wb') as f:
+            pickle.dump(winner, f)
+        
+        print(f"\nTraining complete! Best fitness: {self.best_fitness:.2f}")
+        print("Winner genome saved to best_genome.pkl")
+        
+        # Show winner performance
+        print("\nRunning winner genome...")
+        self.run_single_car(winner, config)
+        
+        pygame.quit()
+        return winner
+
+    def run_single_car(self, genome, config):
+        """Run a single car for demonstration"""
+        net = neat.nn.FeedForwardNetwork.create(genome, config)
+        car = Car(self.start_x, self.start_y, self.start_angle)
+        
+        max_steps = 1000
+        steps = 0
+        reached_goal = False
+        
+        print("\nPress ESC or close window to exit...")
+        running = True
+        
+        while running and steps < max_steps:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+            
+            # Get state and action
+            state = car.get_state(self.road_surface)
+            output = net.activate(state)
+            steering = output[0]
+            acceleration = output[1]
+            
+            # Apply actions
+            car.angle += steering * 5
+            speed = max(0, acceleration * 3)
+            car.move_forward(step=speed)
+            
+            # Check conditions
+            if not self.is_on_road(car.x, car.y):
+                print("Car went off road!")
+                break
+            
+            dist_to_goal = math.sqrt((car.x - self.goal_x)**2 + (car.y - self.goal_y)**2)
+            if dist_to_goal < 30:
+                reached_goal = True
+                print("Car reached the goal!")
+                break
+            
+            steps += 1
+            
+            # Render
+            self.screen.fill((144, 238, 144))
+            self.screen.blit(self.road_surface, (0, 0))
+            pygame.draw.circle(self.screen, (255, 0, 0), 
+                             (int(self.goal_x), int(self.goal_y)), 30, 3)
+            car.draw(self.screen)
+            car.draw_sensors(self.screen, self.road_surface)
+            
+            # Display info
+            info_text = [
+                "WINNER DEMONSTRATION",
+                f"Steps: {steps}",
+                f"Distance to goal: {int(dist_to_goal)}",
+                "Press ESC to exit"
+            ]
+            
+            y_offset = 10
+            for text in info_text:
+                text_surface = self.font.render(text, True, (255, 255, 255))
+                text_bg = pygame.Surface((text_surface.get_width() + 10, 
+                                        text_surface.get_height() + 5))
+                text_bg.fill((0, 0, 0))
+                text_bg.set_alpha(180)
+                self.screen.blit(text_bg, (10, y_offset))
+                self.screen.blit(text_surface, (15, y_offset + 2))
+                y_offset += 28
+            
+            pygame.display.flip()
+            self.clock.tick(60)
+        
+        fitness = self.calculate_fitness(car, steps, reached_goal)
+        print(f"Final fitness: {fitness:.2f}")
+
+
+def run_training(generations=50):
+    """Helper function to start training"""
+    trainer = NEATTrainer()
+    winner = trainer.train(generations=generations)
+    return winner
+
+
+if __name__ == "__main__":
+    # Run training when script is executed directly
+    run_training(generations=50)
